@@ -1,0 +1,68 @@
+body {
+    font-family: Arial;
+    padding: 20px;
+    background: #ffffff;
+    color: #222;
+    transition: background 0.3s, color 0.3s;
+}
+
+html.dark body {
+    background: #111;
+    color: #eee;
+}
+
+.song-block {
+    border: 1px solid #aaa;
+    padding: 15px;
+    margin: 15px 0;
+    border-radius: 8px;
+    background: #f2f2f2;
+    transition: background 0.3s;
+}
+
+.dark .song-block {
+    background: #222;
+    border-color: #555;
+}
+
+.song-controls button {
+    margin-right: 10px;
+}
+
+.wave {
+    margin-top: 10px;
+}
+
+/* DELETE BUTTON */
+.deleteSong {
+    background: #c62828;
+    color: white;
+    border: none;
+    float: right;
+    padding: 5px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+/* Song Title Input */
+.songTitle {
+    width: 60%;
+    padding: 5px;
+    margin-bottom: 8px;
+}
+
+/* Trim handles thicker */
+.region.region-left,
+.region.region-right {
+    border-left: 6px solid red !important;
+    border-right: 6px solid lime !important;
+}
+
+/* Drag highlight */
+.sortable-ghost {
+    opacity: 0.4;
+}
+
+.sortable-chosen {
+    background: yellow !important;
+}
