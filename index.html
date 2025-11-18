@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>NSC Music Timer</title>
+    <title>NSC Music Timer (Multi-Mode)</title>
     <link rel="stylesheet" href="style.css">
 
-    <!-- WaveSurfer v6 -->
+    <!-- WaveSurfer -->
     <script src="https://unpkg.com/wavesurfer.js@6/dist/wavesurfer.min.js"></script>
     <script src="https://unpkg.com/wavesurfer.js@6/dist/plugin/wavesurfer.regions.min.js"></script>
     <script src="https://unpkg.com/wavesurfer.js@6/dist/plugin/wavesurfer.timeline.min.js"></script>
@@ -16,59 +16,72 @@
 
 <body>
 
-<h1>NSC Music Timer</h1>
+<!-- TAB BAR -->
+<div id="tabBar">
+    <button class="tabBtn active" data-tab="hybrid">Hybrid</button>
+    <button class="tabBtn" data-tab="speed">Speed</button>
+    <button class="tabBtn" data-tab="burnout">Burnout</button>
+</div>
 
-<!-- DARK MODE TOGGLE -->
-<div id="darkModeToggle">
+<!-- THREE TAB PAGES -->
+<div id="pages">
+    <div id="page-hybrid"     class="modePage"></div>
+    <div id="page-speed"      class="modePage hidden"></div>
+    <div id="page-burnout"    class="modePage hidden"></div>
+</div>
+
+<!-- MASTER TEMPLATE (THE FULL APP UI, ONLY WRITTEN ONCE) -->
+<template id="appTemplate">
+    <div class="appRoot">
+
+    <h1>NSC Music Timer</h1>
+
+    <div id="darkModeToggle">
+        <label><input type="checkbox" class="darkSwitch"> Dark Mode</label>
+    </div>
+
+    <div class="timeBox">
+        <label>Time Limit (minutes):</label>
+        <input type="number" class="timeLimit" value="4" min="0.1" step="0.25">
+        <button class="saveTimeLimit">Save</button>
+    </div>
+
+    <hr>
+
+    <h2>Songs</h2>
+    <button class="addSong">Add Song</button>
+    <div class="songContainer"></div>
+
+    <hr>
+
+    <h2>Beep Cues</h2>
+    <div class="beepList"></div>
+    <button class="addBeep">Add Beep</button>
+    <button class="saveBeeps">Save Beeps</button>
+
+    <hr>
+
+    <h2>Starter Beeps</h2>
     <label>
-        <input type="checkbox" id="darkSwitch">
-        Dark Mode
+        <input type="checkbox" class="starterBeepToggle"> Enable ANW Starter Beeps (3–2–1)
     </label>
-</div>
 
-<!-- Time Limit -->
-<div class="timeBox">
-    <label>Time Limit (minutes):</label>
-    <input type="number" id="timeLimit" value="4" min="0.1" step="0.25">
-    <button id="saveTimeLimit">Save</button>
-</div>
+    <hr>
 
-<hr>
+    <button class="buildTrack">Build Final Track</button>
 
-<h2>Songs</h2>
-<button id="addSong">Add Song</button>
+    <h2>Final Track</h2>
+    <div class="mainTimeline"></div>
+    <div class="mainWaveform"></div>
 
-<!-- SORTABLE CONTAINER -->
-<div id="songContainer"></div>
+    <h2>Playback Controls</h2>
+    <button class="startRun" disabled>Start Run</button>
+    <button class="pauseBtn">Pause</button>
+    <button class="resumeBtn">Resume</button>
+    <button class="restartBtn">Restart</button>
 
-<hr>
-
-<h2>Beep Cues</h2>
-<div id="beepList"></div>
-<button id="addBeep">Add Beep</button>
-<button id="saveBeeps">Save Beeps</button>
-
-<hr>
-
-<h2>Starter Beeps</h2>
-<label>
-    <input type="checkbox" id="starterBeepToggle">
-    Enable ANW Starter Beeps (3–2–1)
-</label>
-
-<hr>
-
-<button id="buildTrack">Build Final Track</button>
-
-<h2>Final Track</h2>
-<div id="mainTimeline"></div>
-<div id="mainWaveform"></div>
-
-<h2>Playback Controls</h2>
-<button id="startRun" disabled>Start Run</button>
-<button id="pauseBtn">Pause</button>
-<button id="resumeBtn">Resume</button>
-<button id="restartBtn">Restart</button>
+    </div>
+</template>
 
 <script src="script.js"></script>
 </body>

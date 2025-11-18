@@ -1,157 +1,256 @@
-///////////////////////////////////////////////////////////////////////
-// NSC Music Timer — with delete, reorder, rename,
-// thicker handles, dark mode — WaveSurfer v6
-///////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+// NSC Music Timer — Multi-Mode (Hybrid / Speed / Burnout)
+// One template, three isolated app instances, each with its own DB namespace.
+///////////////////////////////////////////////////////////////////////////////
 
-let audioCtx = null;
-let beepBuffer = null;
+const MODES = ["hybrid", "speed", "burnout"];
+let CURRENT_MODE = "hybrid";
 
-let songs = [];        // Array of song objects in UI order
-let mainWave = null;
-let lastCombinedBuffer = null;
+// Each mode stores its OWN app instance object:
+const appInstances = {};
 
-let db = null;
-
-let beepSecondsLeft = [180,120,60,30,10];
-let TIME_LIMIT = 240;
-
-///////////////////////////////////////////////////////////////////////
-// INIT
-///////////////////////////////////////////////////////////////////////
-window.addEventListener("load", async () => {
-    await initDB();
-    await loadSettingsFromDB();
-    await loadSongsFromDB();
-
-    wireButtons();
-    enableDragReorder();
+window.addEventListener("load", () => {
+    loadTemplateIntoPages();
+    setupTabs();
+    initMode("hybrid");       // default
 });
 
-function wireButtons() {
-    document.getElementById("addSong").onclick = addSongBlock;
-    document.getElementById("buildTrack").onclick = buildTrack;
-    document.getElementById("startRun").onclick = startRun;
+///////////////////////////////////////////////////////////////////////////////
+// LOAD TEMPLATE INTO EACH MODE PAGE
+///////////////////////////////////////////////////////////////////////////////
+function loadTemplateIntoPages() {
+    const tpl = document.getElementById("appTemplate");
 
-    document.getElementById("pauseBtn").onclick = () => mainWave?.pause();
-    document.getElementById("resumeBtn").onclick = () => mainWave?.play();
-    document.getElementById("restartBtn").onclick = () => {
-        if(mainWave){ mainWave.seekTo(0); mainWave.play(); }
-    };
+    MODES.forEach(mode => {
+        const page = document.getElementById("page-" + mode);
+        const clone = tpl.content.cloneNode(true);
+        page.appendChild(clone);
 
-    document.getElementById("saveTimeLimit").onclick = () => {
-        const min = parseFloat(document.getElementById("timeLimit").value);
-        if(!isNaN(min)){ TIME_LIMIT = min*60; saveSettingsToDB(); }
-    };
+        appInstances[mode] = createBlankAppInstance(page);
+    });
+}
 
-    document.getElementById("darkSwitch").onchange = () => {
-        document.documentElement.classList.toggle("dark");
-        saveSettingsToDB();
-    };
-
-    document.getElementById("addBeep").onclick = () => {
-        beepSecondsLeft.push(60);
-        renderBeepInputs();
-        saveSettingsToDB();
-    };
-
-    document.getElementById("saveBeeps").onclick = () => {
-        beepSecondsLeft = Array.from(
-            document.querySelectorAll("#beepList input")
-        ).map(v => Number(v.value));
-        saveSettingsToDB();
-        if(lastCombinedBuffer) makeMainWaveform(lastCombinedBuffer);
+///////////////////////////////////////////////////////////////////////////////
+// CREATE NEW APP INSTANCE OBJECT
+///////////////////////////////////////////////////////////////////////////////
+function createBlankAppInstance(root) {
+    return {
+        root,
+        db: null,
+        audioCtx: null,
+        beepBuffer: null,
+        songs: [],
+        mainWave: null,
+        lastCombinedBuffer: null,
+        beepSecondsLeft: [180, 120, 60, 30, 10],
+        TIME_LIMIT: 240 // seconds
     };
 }
 
-///////////////////////////////////////////////////////////////////////
-// IndexedDB
-///////////////////////////////////////////////////////////////////////
-function initDB() {
-    return new Promise(res=>{
-        const req = indexedDB.open("nsc-timer-db",5);
-        req.onupgradeneeded=e=>{
-            const db=e.target.result;
-            if(!db.objectStoreNames.contains("songs"))
-                db.createObjectStore("songs",{keyPath:"id",autoIncrement:true});
-            if(!db.objectStoreNames.contains("settings"))
-                db.createObjectStore("settings",{keyPath:"key"});
+///////////////////////////////////////////////////////////////////////////////
+// TAB SWITCHING
+///////////////////////////////////////////////////////////////////////////////
+function setupTabs() {
+    document.querySelectorAll(".tabBtn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            switchMode(btn.dataset.tab);
+        });
+    });
+}
+
+function switchMode(mode) {
+    CURRENT_MODE = mode;
+
+    document.querySelectorAll(".tabBtn")
+        .forEach(b => b.classList.remove("active"));
+    document.querySelector(`.tabBtn[data-tab="${mode}"]`).classList.add("active");
+
+    document.querySelectorAll(".modePage")
+        .forEach(p => p.classList.add("hidden"));
+    document.getElementById("page-" + mode).classList.remove("hidden");
+
+    initMode(mode);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// INITIALIZE A MODE (IndexedDB load + wiring)
+///////////////////////////////////////////////////////////////////////////////
+async function initMode(mode) {
+    const app = appInstances[mode];
+
+    if (!app.db) {
+        await initDB(mode, app);
+        await loadSettingsFromDB(app);
+        await loadSongsFromDB(app);
+    }
+
+    wireButtons(app);
+    enableDragReorder(app);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// INDEXEDDB SETUP — PER MODE
+///////////////////////////////////////////////////////////////////////////////
+function initDB(mode, app) {
+    return new Promise(res => {
+        const req = indexedDB.open(`nsc-timer-db-${mode}`, 5);
+
+        req.onupgradeneeded = e => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains("songs"))
+                db.createObjectStore("songs", { keyPath: "id", autoIncrement: true });
+            if (!db.objectStoreNames.contains("settings"))
+                db.createObjectStore("settings", { keyPath: "key" });
         };
-        req.onsuccess=e=>{ db=e.target.result; res(); };
+
+        req.onsuccess = e => {
+            app.db = e.target.result;
+            res();
+        };
     });
 }
 
-function dbPut(store,value){
-    return new Promise(res=>{
-        const tx=db.transaction([store],"readwrite");
-        tx.objectStore(store).put(value).onsuccess=res;
+function dbPut(app, store, value) {
+    return new Promise(res => {
+        const tx = app.db.transaction([store], "readwrite");
+        tx.objectStore(store).put(value).onsuccess = res;
     });
 }
 
-function dbGetAll(store){
-    return new Promise(res=>{
-        const tx=db.transaction([store]);
-        const q=tx.objectStore(store).getAll();
-        q.onsuccess=()=>res(q.result||[]);
+function dbGetAll(app, store) {
+    return new Promise(res => {
+        const tx = app.db.transaction([store]);
+        const q = tx.objectStore(store).getAll();
+        q.onsuccess = () => res(q.result || []);
     });
 }
 
-function dbGet(store,key){
-    return new Promise(res=>{
-        const tx=db.transaction([store]);
-        const q=tx.objectStore(store).get(key);
-        q.onsuccess=()=>res(q.result||null);
+function dbGet(app, store, key) {
+    return new Promise(res => {
+        const tx = app.db.transaction([store]);
+        const q = tx.objectStore(store).get(key);
+        q.onsuccess = () => res(q.result || null);
     });
 }
 
-///////////////////////////////////////////////////////////////////////
-// Settings Load/Save
-///////////////////////////////////////////////////////////////////////
-async function loadSettingsFromDB() {
-    const s=await dbGet("settings","main");
-    if(!s) return;
+///////////////////////////////////////////////////////////////////////////////
+// SETTINGS LOAD/SAVE
+///////////////////////////////////////////////////////////////////////////////
+async function loadSettingsFromDB(app) {
+    const s = await dbGet(app, "settings", "main");
+    if (!s) return;
 
-    beepSecondsLeft = s.beepTimes ?? beepSecondsLeft;
-    TIME_LIMIT = s.timeLimit ?? TIME_LIMIT;
+    app.beepSecondsLeft = s.beepTimes ?? app.beepSecondsLeft;
+    app.TIME_LIMIT = s.timeLimit ?? app.TIME_LIMIT;
 
-    document.getElementById("starterBeepToggle").checked = !!s.starterBeep;
-    document.getElementById("darkSwitch").checked = !!s.darkMode;
+    // Update UI
+    app.root.querySelector(".starterBeepToggle").checked = !!s.starterBeep;
+    app.root.querySelector(".darkSwitch").checked = !!s.darkMode;
 
-    if(s.darkMode) document.documentElement.classList.add("dark");
+    if (s.darkMode) document.documentElement.classList.add("dark");
 
-    document.getElementById("timeLimit").value = (TIME_LIMIT/60).toFixed(2);
+    app.root.querySelector(".timeLimit").value = (app.TIME_LIMIT / 60).toFixed(2);
+
+    renderBeepInputs(app);
 }
 
-function saveSettingsToDB() {
-    dbPut("settings",{
-        key:"main",
-        beepTimes:beepSecondsLeft,
-        starterBeep:document.getElementById("starterBeepToggle").checked,
-        timeLimit:TIME_LIMIT,
-        darkMode:document.getElementById("darkSwitch").checked
+function saveSettingsToDB(app) {
+    dbPut(app, "settings", {
+        key: "main",
+        beepTimes: app.beepSecondsLeft,
+        starterBeep: app.root.querySelector(".starterBeepToggle").checked,
+        timeLimit: app.TIME_LIMIT,
+        darkMode: app.root.querySelector(".darkSwitch").checked
     });
 }
 
-///////////////////////////////////////////////////////////////////////
-// Load Songs
-///////////////////////////////////////////////////////////////////////
-async function loadSongsFromDB(){
-    const stored=await dbGetAll("songs");
-    for(const s of stored) await restoreSongFromDB(s);
-    renderBeepInputs();
+///////////////////////////////////////////////////////////////////////////////
+// WIRES BUTTONS PER INSTANCE
+///////////////////////////////////////////////////////////////////////////////
+function wireButtons(app) {
+    const r = app.root;
+
+    r.querySelector(".addSong").onclick = () => addSongBlock(app);
+    r.querySelector(".buildTrack").onclick = () => buildTrack(app);
+    r.querySelector(".startRun").onclick = () => startRun(app);
+
+    r.querySelector(".pauseBtn").onclick = () => app.mainWave?.pause();
+    r.querySelector(".resumeBtn").onclick = () => app.mainWave?.play();
+    r.querySelector(".restartBtn").onclick = () => {
+        if (app.mainWave) { app.mainWave.seekTo(0); app.mainWave.play(); }
+    };
+
+    r.querySelector(".saveTimeLimit").onclick = () => {
+        const min = parseFloat(r.querySelector(".timeLimit").value);
+        if (!isNaN(min)) {
+            app.TIME_LIMIT = min * 60;
+            saveSettingsToDB(app);
+        }
+    };
+
+    r.querySelector(".darkSwitch").onchange = () => {
+        document.documentElement.classList.toggle("dark");
+        saveSettingsToDB(app);
+    };
+
+    r.querySelector(".addBeep").onclick = () => {
+        app.beepSecondsLeft.push(60);
+        renderBeepInputs(app);
+        saveSettingsToDB(app);
+    };
+
+    r.querySelector(".saveBeeps").onclick = () => {
+        app.beepSecondsLeft = Array.from(
+            r.querySelectorAll(".beepList input")
+        ).map(v => Number(v.value));
+        saveSettingsToDB(app);
+        if (app.lastCombinedBuffer) makeMainWaveform(app, app.lastCombinedBuffer);
+    };
 }
 
-///////////////////////////////////////////////////////////////////////
-// Add Song Block
-///////////////////////////////////////////////////////////////////////
-function addSongBlock() {
-    const container=document.getElementById("songContainer");
-    const id="wave-"+Math.random().toString(36).slice(2);
+///////////////////////////////////////////////////////////////////////////////
+// BEEP INPUTS
+///////////////////////////////////////////////////////////////////////////////
+function renderBeepInputs(app) {
+    const list = app.root.querySelector(".beepList");
+    list.innerHTML = "";
 
-    const div=document.createElement("div");
-    div.className="song-block";
-    div.dataset.songId="0";
+    app.beepSecondsLeft.forEach((sec, i) => {
+        const div = document.createElement("div");
+        div.innerHTML = `
+            <input type="number" value="${sec}">
+            <button class="removeBeepBtn">X</button>
+        `;
+        div.querySelector(".removeBeepBtn").onclick = () => {
+            app.beepSecondsLeft.splice(i, 1);
+            renderBeepInputs(app);
+            saveSettingsToDB(app);
+        };
+        list.appendChild(div);
+    });
+}
 
-    div.innerHTML=`
+///////////////////////////////////////////////////////////////////////////////
+// LOAD SONGS FROM DB
+///////////////////////////////////////////////////////////////////////////////
+async function loadSongsFromDB(app) {
+    const stored = await dbGetAll(app, "songs");
+    for (const s of stored) await restoreSongFromDB(app, s);
+    renderBeepInputs(app);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// SONG BLOCK — UI ELEMENT CREATION
+///////////////////////////////////////////////////////////////////////////////
+function addSongBlock(app) {
+    const container = app.root.querySelector(".songContainer");
+    const id = "wave-" + Math.random().toString(36).slice(2);
+
+    const div = document.createElement("div");
+    div.className = "song-block";
+    div.dataset.songId = "0";
+
+    div.innerHTML = `
         <input class="songTitle" placeholder="Song Title">
         <button class="deleteSong">Delete</button>
         <br>
@@ -168,352 +267,345 @@ function addSongBlock() {
 
     container.appendChild(div);
 
-    div.querySelector(".deleteSong").onclick = () => deleteSong(div);
+    div.querySelector(".deleteSong").onclick = () => deleteSong(app, div);
 
-    div.querySelector(".song-file").onchange = e=>{
-        if(e.target.files.length>0)
-            loadNewSong(e.target.files[0],id,div);
+    div.querySelector(".song-file").onchange = e => {
+        if (e.target.files.length > 0)
+            loadNewSong(app, e.target.files[0], id, div);
     };
 
     return div;
 }
 
-///////////////////////////////////////////////////////////////////////
-// Delete song
-///////////////////////////////////////////////////////////////////////
-function deleteSong(blockEl){
-    const idx=[...blockEl.parentNode.children].indexOf(blockEl);
-    songs.splice(idx,1);
+///////////////////////////////////////////////////////////////////////////////
+// DELETE SONG
+///////////////////////////////////////////////////////////////////////////////
+function deleteSong(app, blockEl) {
+    const idx = [...blockEl.parentNode.children].indexOf(blockEl);
+    app.songs.splice(idx, 1);
     blockEl.remove();
-    saveAllSongsToDB();
-}
-////////////////////////
-
-function renderBeepInputs() {
-    const list = document.getElementById("beepList");
-    list.innerHTML = "";
-
-    beepSecondsLeft.forEach((sec, i) => {
-        const div = document.createElement("div");
-        div.innerHTML = `
-            <input type="number" value="${sec}">
-            <button onclick="removeBeep(${i})">X</button>
-        `;
-        list.appendChild(div);
-    });
+    saveAllSongsToDB(app);
 }
 
-function removeBeep(i) {
-    beepSecondsLeft.splice(i, 1);
-    renderBeepInputs();
-    saveSettingsToDB();
-}
-
-///////////////////////////////////////////////////////////////////////
-// Save all songs (after reorder/delete)
-///////////////////////////////////////////////////////////////////////
-function saveAllSongsToDB(){
-    // wipe store
-    const tx=db.transaction(["songs"],"readwrite");
-    tx.objectStore("songs").clear().onsuccess = ()=>{
-        // reinsert in UI order
-        songs.forEach(s=>saveSongToDB(s));
+///////////////////////////////////////////////////////////////////////////////
+// SAVE ALL SONGS AFTER REORDER/DELETE
+///////////////////////////////////////////////////////////////////////////////
+function saveAllSongsToDB(app) {
+    const tx = app.db.transaction(["songs"], "readwrite");
+    tx.objectStore("songs").clear().onsuccess = () => {
+        app.songs.forEach(s => saveSongToDB(app, s));
     };
 }
 
-///////////////////////////////////////////////////////////////////////
-// Drag Reorder
-///////////////////////////////////////////////////////////////////////
-function enableDragReorder(){
-    new Sortable(songContainer,{
-        animation:150,
-        onEnd:()=>{
-            // reorder internal array to match DOM
-            const blocks=[...document.querySelectorAll(".song-block")];
-            songs = blocks.map(b=>{
-                const id=b.dataset.songId;
-                return songs.find(s=>s.id==id);
-            }).filter(x=>x); // remove nulls
-            saveAllSongsToDB();
+///////////////////////////////////////////////////////////////////////////////
+// DRAG REORDER
+///////////////////////////////////////////////////////////////////////////////
+function enableDragReorder(app) {
+    new Sortable(app.root.querySelector(".songContainer"), {
+        animation: 150,
+        onEnd: () => {
+            const blocks = [...app.root.querySelectorAll(".song-block")];
+            app.songs = blocks.map(b => {
+                const id = b.dataset.songId;
+                return app.songs.find(s => s.id == id);
+            }).filter(x => x);
+            saveAllSongsToDB(app);
         }
     });
 }
 
-///////////////////////////////////////////////////////////////////////
-// Load NEW song
-///////////////////////////////////////////////////////////////////////
-function loadNewSong(file,waveId,blockEl){
+///////////////////////////////////////////////////////////////////////////////
+// LOAD NEW SONG FILE
+///////////////////////////////////////////////////////////////////////////////
+function loadNewSong(app, file, waveId, blockEl) {
     const wave = WaveSurfer.create({
-        container:"#"+waveId,
-        waveColor:"#33aaff",
-        progressColor:"#77ddff",
-        height:120,
-        plugins:[ WaveSurfer.regions.create({}) ]
+        container: "#" + waveId,
+        waveColor: "#33aaff",
+        progressColor: "#77ddff",
+        height: 120,
+        plugins: [WaveSurfer.regions.create({})]
     });
 
     wave.loadBlob(file);
 
-    wave.on("ready",async()=>{
-        const dur=wave.getDuration();
+    wave.on("ready", async () => {
+        const dur = wave.getDuration();
 
-        const left=wave.addRegion({
-            start:0, end:0.4,
-            drag:false, resize:true,
-            color:"rgba(255,0,0,0.18)"
+        const left = wave.addRegion({
+            start: 0, end: 0.4,
+            drag: false, resize: true,
+            color: "rgba(255,0,0,0.18)"
         });
 
-        const right=wave.addRegion({
-            start:dur-0.4, end:dur,
-            drag:false, resize:true,
-            color:"rgba(0,255,0,0.18)"
+        const right = wave.addRegion({
+            start: dur - 0.4, end: dur,
+            drag: false, resize: true,
+            color: "rgba(0,255,0,0.18)"
         });
 
-        const buffer=await file.arrayBuffer();
+        const buffer = await file.arrayBuffer();
 
         const titleInput = blockEl.querySelector(".songTitle");
 
-        const obj={
-            id:null,
+        const obj = {
+            id: null,
             file,
             wave,
-            leftHandle:left,
-            rightHandle:right,
-            arrayBuffer:buffer,
-            title:titleInput.value || file.name
+            leftHandle: left,
+            rightHandle: right,
+            arrayBuffer: buffer,
+            title: titleInput.value || file.name
         };
 
         blockEl.dataset.songId = "NEW";
 
-        left.on("update-end",()=>saveSongToDB(obj));
-        right.on("update-end",()=>saveSongToDB(obj));
+        left.on("update-end", () => saveSongToDB(app, obj));
+        right.on("update-end", () => saveSongToDB(app, obj));
 
-        blockEl.querySelector(".previewPlay").onclick = ()=>wave.play(left.end,right.start);
-        blockEl.querySelector(".previewPause").onclick = ()=>wave.pause();
+        blockEl.querySelector(".previewPlay").onclick =
+            () => wave.play(left.end, right.start);
 
-        titleInput.oninput = ()=>{ obj.title = titleInput.value; saveSongToDB(obj); };
+        blockEl.querySelector(".previewPause").onclick =
+            () => wave.pause();
 
-        saveSongToDB(obj);
-        songs.push(obj);
+        titleInput.oninput = () => { obj.title = titleInput.value; saveSongToDB(app, obj); };
+
+        saveSongToDB(app, obj);
+        app.songs.push(obj);
     });
 }
 
-///////////////////////////////////////////////////////////////////////
-// Restore from DB
-///////////////////////////////////////////////////////////////////////
-async function restoreSongFromDB(saved){
-    const block=addSongBlock();
-    const waveId=block.querySelector(".wave").id;
+///////////////////////////////////////////////////////////////////////////////
+// RESTORE SONG FROM DB
+///////////////////////////////////////////////////////////////////////////////
+async function restoreSongFromDB(app, saved) {
+    const block = addSongBlock(app);
+    const waveId = block.querySelector(".wave").id;
 
-    const file=new File([saved.data],saved.name,{type:saved.type});
+    const file = new File([saved.data], saved.name, { type: saved.type });
 
-    const wave=WaveSurfer.create({
-        container:"#"+waveId,
-        waveColor:"#33aaff",
-        progressColor:"#77ddff",
-        height:120,
-        plugins:[ WaveSurfer.regions.create({}) ]
+    const wave = WaveSurfer.create({
+        container: "#" + waveId,
+        waveColor: "#33aaff",
+        progressColor: "#77ddff",
+        height: 120,
+        plugins: [WaveSurfer.regions.create({})]
     });
 
     wave.loadBlob(file);
 
-    wave.on("ready",()=>{
-        const dur=wave.getDuration();
+    wave.on("ready", () => {
+        const dur = wave.getDuration();
 
-        const left=wave.addRegion({
-            start:0,
-            end:saved.trimStart,
-            drag:false,
-            resize:true,
-            color:"rgba(255,0,0,0.18)"
-        });
-        const right=wave.addRegion({
-            start:saved.trimEnd,
-            end:dur,
-            drag:false,
-            resize:true,
-            color:"rgba(0,255,0,0.18)"
+        const left = wave.addRegion({
+            start: 0,
+            end: saved.trimStart,
+            drag: false,
+            resize: true,
+            color: "rgba(255,0,0,0.18)"
         });
 
-        const obj={
-            id:saved.id,
+        const right = wave.addRegion({
+            start: saved.trimEnd,
+            end: dur,
+            drag: false,
+            resize: true,
+            color: "rgba(0,255,0,0.18)"
+        });
+
+        const obj = {
+            id: saved.id,
             file,
             wave,
-            leftHandle:left,
-            rightHandle:right,
-            arrayBuffer:saved.data,
-            title:saved.title||saved.name
+            leftHandle: left,
+            rightHandle: right,
+            arrayBuffer: saved.data,
+            title: saved.title || saved.name
         };
 
         block.dataset.songId = saved.id;
 
         const titleInput = block.querySelector(".songTitle");
         titleInput.value = obj.title;
-        titleInput.oninput = ()=>{ obj.title=titleInput.value; saveSongToDB(obj); };
+        titleInput.oninput = () => { obj.title = titleInput.value; saveSongToDB(app, obj); };
 
-        block.querySelector(".previewPlay").onclick = ()=>wave.play(left.end,right.start);
-        block.querySelector(".previewPause").onclick = ()=>wave.pause();
+        block.querySelector(".previewPlay").onclick =
+            () => wave.play(left.end, right.start);
 
-        left.on("update-end",()=>saveSongToDB(obj));
-        right.on("update-end",()=>saveSongToDB(obj));
+        block.querySelector(".previewPause").onclick =
+            () => wave.pause();
 
-        songs.push(obj);
+        left.on("update-end", () => saveSongToDB(app, obj));
+        right.on("update-end", () => saveSongToDB(app, obj));
+
+        app.songs.push(obj);
     });
 }
 
-///////////////////////////////////////////////////////////////////////
-// Save Song
-///////////////////////////////////////////////////////////////////////
-function saveSongToDB(obj){
-    const rec={
-        name:obj.file.name,
-        type:obj.file.type,
-        data:obj.arrayBuffer,
-        trimStart:obj.leftHandle.end,
-        trimEnd:obj.rightHandle.start,
-        title:obj.title
+///////////////////////////////////////////////////////////////////////////////
+// SAVE SONG TO DB
+///////////////////////////////////////////////////////////////////////////////
+function saveSongToDB(app, obj) {
+    const rec = {
+        name: obj.file.name,
+        type: obj.file.type,
+        data: obj.arrayBuffer,
+        trimStart: obj.leftHandle.end,
+        trimEnd: obj.rightHandle.start,
+        title: obj.title
     };
-    if(obj.id) rec.id=obj.id;
+    if (obj.id) rec.id = obj.id;
 
-    dbPut("songs",rec).then(async()=>{
-        if(!obj.id){
-            const all=await dbGetAll("songs");
-            const m=all.find(x=>x.name===rec.name && x.trimStart===rec.trimStart);
-            if(m) obj.id=m.id;
+    dbPut(app, "songs", rec).then(async () => {
+        if (!obj.id) {
+            const all = await dbGetAll(app, "songs");
+            const match = all.find(x =>
+                x.name === rec.name &&
+                x.trimStart === rec.trimStart
+            );
+            if (match) obj.id = match.id;
         }
     });
 }
 
-///////////////////////////////////////////////////////////////////////
-// Build Track
-///////////////////////////////////////////////////////////////////////
-async function buildTrack(){
-    audioCtx=new AudioContext();
+///////////////////////////////////////////////////////////////////////////////
+// BUILD FINAL TRACK
+///////////////////////////////////////////////////////////////////////////////
+async function buildTrack(app) {
+    app.audioCtx = new AudioContext();
 
-    const beepData=await fetch("beep.wav");
-    beepBuffer=await audioCtx.decodeAudioData(await beepData.arrayBuffer());
+    const beepData = await fetch("beep.wav");
+    app.beepBuffer = await app.audioCtx.decodeAudioData(await beepData.arrayBuffer());
 
-    const RUN=TIME_LIMIT;
-    const rate=audioCtx.sampleRate;
-    const final=audioCtx.createBuffer(2,RUN*rate,rate);
+    const RUN = app.TIME_LIMIT;
+    const rate = app.audioCtx.sampleRate;
+    const final = app.audioCtx.createBuffer(2, RUN * rate, rate);
 
-    let offset=0;
+    let offset = 0;
 
-    for(let s of songs){
-        const decoded=await decodeFixRate(s.arrayBuffer);
+    for (let s of app.songs) {
+        const decoded = await decodeFixRate(app, s.arrayBuffer);
 
-        const L=Math.floor(s.leftHandle.end*rate);
-        const R=Math.floor(s.rightHandle.start*rate);
+        const L = Math.floor(s.leftHandle.end * rate);
+        const R = Math.floor(s.rightHandle.start * rate);
 
-        const length=R-L;
-        const rem=(RUN*rate)-offset;
-        const copy=Math.min(length,rem);
+        const length = R - L;
+        const rem = (RUN * rate) - offset;
+        const copy = Math.min(length, rem);
 
-        for(let ch=0;ch<decoded.numberOfChannels;ch++){
+        for (let ch = 0; ch < decoded.numberOfChannels; ch++) {
             final.getChannelData(ch).set(
-                decoded.getChannelData(ch).slice(L,L+copy),
+                decoded.getChannelData(ch).slice(L, L + copy),
                 offset
             );
         }
+
         offset += copy;
-        if(offset>=RUN*rate) break;
+        if (offset >= RUN * rate) break;
     }
 
-    lastCombinedBuffer=final;
-    makeMainWaveform(final);
+    app.lastCombinedBuffer = final;
+    makeMainWaveform(app, final);
 
-    document.getElementById("startRun").disabled=false;
+    app.root.querySelector(".startRun").disabled = false;
     alert("Track built!");
 }
 
-async function decodeFixRate(buf){
-    const original=await audioCtx.decodeAudioData(buf);
-    if(original.sampleRate===audioCtx.sampleRate) return original;
+async function decodeFixRate(app, buf) {
+    const original = await app.audioCtx.decodeAudioData(buf);
+    if (original.sampleRate === app.audioCtx.sampleRate) return original;
 
-    const off=new OfflineAudioContext(
+    const off = new OfflineAudioContext(
         original.numberOfChannels,
-        original.duration*audioCtx.sampleRate,
-        audioCtx.sampleRate
+        original.duration * app.audioCtx.sampleRate,
+        app.audioCtx.sampleRate
     );
-    const src=off.createBufferSource();
-    src.buffer=original;
+    const src = off.createBufferSource();
+    src.buffer = original;
     src.connect(off.destination);
     src.start();
     return off.startRendering();
 }
 
-///////////////////////////////////////////////////////////////////////
-// Make Final Waveform
-///////////////////////////////////////////////////////////////////////
-function makeMainWaveform(buffer){
-    if(mainWave) mainWave.destroy();
+///////////////////////////////////////////////////////////////////////////////
+// MAIN WAVEFORM
+///////////////////////////////////////////////////////////////////////////////
+function makeMainWaveform(app, buffer) {
+    if (app.mainWave) app.mainWave.destroy();
 
-    mainWave = WaveSurfer.create({
-        container:"#mainWaveform",
-        waveColor:"#44dd66",
-        progressColor:"#66ff88",
-        height:150,
-        plugins:[ WaveSurfer.timeline.create({container:"#mainTimeline"}) ]
+    app.mainWave = WaveSurfer.create({
+        container: app.root.querySelector(".mainWaveform"),
+        waveColor: "#44dd66",
+        progressColor: "#66ff88",
+        height: 150,
+        plugins: [
+            WaveSurfer.timeline.create({
+                container: app.root.querySelector(".mainTimeline")
+            })
+        ]
     });
 
-    mainWave.loadDecodedBuffer(buffer);
+    app.mainWave.loadDecodedBuffer(buffer);
 
-    mainWave.on("ready",()=>{
-        const drawer=mainWave.drawer;
-        beepSecondsLeft.forEach(sec=>{
-            const t=TIME_LIMIT-sec;
-            const x=drawer.width*(t/TIME_LIMIT);
+    app.mainWave.on("ready", () => {
+        const drawer = app.mainWave.drawer;
+        app.beepSecondsLeft.forEach(sec => {
+            const t = app.TIME_LIMIT - sec;
+            const x = drawer.width * (t / app.TIME_LIMIT);
 
-            const ctx=drawer.canvasContext;
+            const ctx = drawer.canvasContext;
             ctx.save();
-            ctx.strokeStyle="rgba(255,0,0,0.9)";
-            ctx.lineWidth=2;
+            ctx.strokeStyle = "rgba(255,0,0,0.9)";
+            ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.moveTo(x,0);
-            ctx.lineTo(x,drawer.height);
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, drawer.height);
             ctx.stroke();
             ctx.restore();
         });
     });
 }
 
-///////////////////////////////////////////////////////////////////////
-// Run Start
-///////////////////////////////////////////////////////////////////////
-function startRun(){
-    if(!mainWave) return;
+///////////////////////////////////////////////////////////////////////////////
+// RUN START
+///////////////////////////////////////////////////////////////////////////////
+function startRun(app) {
+    if (!app.mainWave) return;
 
-    const starter=document.getElementById("starterBeepToggle").checked;
+    const starter = app.root.querySelector(".starterBeepToggle").checked;
 
-    if(starter){
-        playAfter(0); playAfter(1); playAfter(2);
+    if (starter) {
+        playAfter(app, 0);
+        playAfter(app, 1);
+        playAfter(app, 2);
 
-        setTimeout(()=>{
-            mainWave.seekTo(0);
-            mainWave.play();
-            scheduleBeeps();
-        },4000);
+        setTimeout(() => {
+            app.mainWave.seekTo(0);
+            app.mainWave.play();
+            scheduleBeeps(app);
+        }, 4000);
 
     } else {
-        mainWave.seekTo(0);
-        mainWave.play();
-        scheduleBeeps();
+        app.mainWave.seekTo(0);
+        app.mainWave.play();
+        scheduleBeeps(app);
     }
 }
 
-function playAfter(t){
-    setTimeout(()=>playBeep(),t*1000);
+function playAfter(app, t) {
+    setTimeout(() => playBeep(app), t * 1000);
 }
 
-function scheduleBeeps(){
-    beepSecondsLeft.forEach(sec=>{
-        const t=TIME_LIMIT-sec;
-        setTimeout(()=>playBeep(),t*1000);
+function scheduleBeeps(app) {
+    app.beepSecondsLeft.forEach(sec => {
+        const t = app.TIME_LIMIT - sec;
+        setTimeout(() => playBeep(app), t * 1000);
     });
 }
 
-function playBeep(){
-    const src=audioCtx.createBufferSource();
-    src.buffer=beepBuffer;
-    src.connect(audioCtx.destination);
+function playBeep(app) {
+    const src = app.audioCtx.createBufferSource();
+    src.buffer = app.beepBuffer;
+    src.connect(app.audioCtx.destination);
     src.start();
 }

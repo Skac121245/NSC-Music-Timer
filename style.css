@@ -11,6 +11,31 @@ html.dark body {
     color: #eee;
 }
 
+/* TAB BAR */
+#tabBar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.tabBtn {
+    padding: 10px 20px;
+    cursor: pointer;
+    border: 1px solid #777;
+    background: #ddd;
+    border-radius: 6px;
+}
+
+.tabBtn.active {
+    background: #4CAF50;
+    color: white;
+}
+
+.hidden {
+    display: none;
+}
+
+/* YOUR ORIGINAL STYLES */
 .song-block {
     border: 1px solid #aaa;
     padding: 15px;
@@ -33,7 +58,6 @@ html.dark body {
     margin-top: 10px;
 }
 
-/* DELETE BUTTON */
 .deleteSong {
     background: #c62828;
     color: white;
@@ -44,21 +68,18 @@ html.dark body {
     cursor: pointer;
 }
 
-/* Song Title Input */
 .songTitle {
     width: 60%;
     padding: 5px;
     margin-bottom: 8px;
 }
 
-/* Trim handles thicker */
 .region.region-left,
 .region.region-right {
     border-left: 6px solid red !important;
     border-right: 6px solid lime !important;
 }
 
-/* Drag highlight */
 .sortable-ghost {
     opacity: 0.4;
 }
