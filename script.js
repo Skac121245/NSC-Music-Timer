@@ -110,10 +110,18 @@ function initDB(mode, app) {
     });
 }
 
+// dbPut now resolves with the key (id) assigned by IndexedDB
 function dbPut(app, store, value) {
-    return new Promise(res => {
+    return new Promise((resolve, reject) => {
         const tx = app.db.transaction([store], "readwrite");
-        tx.objectStore(store).put(value).onsuccess = res;
+        const os = tx.objectStore(store);
+        const req = os.put(value);
+
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = e => {
+            console.error("dbPut error:", e);
+            reject(e);
+        };
     });
 }
 
@@ -161,7 +169,7 @@ function saveSettingsToDB(app) {
         starterBeep: app.root.querySelector(".starterBeepToggle").checked,
         timeLimit: app.TIME_LIMIT,
         darkMode: app.root.querySelector(".darkSwitch").checked
-    });
+    }).catch(err => console.error("Error saving settings:", err));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -173,6 +181,12 @@ function wireButtons(app) {
     r.querySelector(".addSong").onclick = () => addSongBlock(app);
     r.querySelector(".buildTrack").onclick = () => buildTrack(app);
     r.querySelector(".startRun").onclick = () => startRun(app);
+
+    // NEW: export button handler
+    const exportBtn = r.querySelector(".exportTrack");
+    if (exportBtn) {
+        exportBtn.onclick = () => exportTrack(app);
+    }
 
     r.querySelector(".pauseBtn").onclick = () => app.mainWave?.pause();
     r.querySelector(".resumeBtn").onclick = () => app.mainWave?.play();
@@ -235,7 +249,10 @@ function renderBeepInputs(app) {
 ///////////////////////////////////////////////////////////////////////////////
 async function loadSongsFromDB(app) {
     const stored = await dbGetAll(app, "songs");
-    for (const s of stored) await restoreSongFromDB(app, s);
+    app.songs = []; // reset in-memory list to match DB
+    for (const s of stored) {
+        await restoreSongFromDB(app, s);
+    }
     renderBeepInputs(app);
 }
 
@@ -282,7 +299,9 @@ function addSongBlock(app) {
 ///////////////////////////////////////////////////////////////////////////////
 function deleteSong(app, blockEl) {
     const idx = [...blockEl.parentNode.children].indexOf(blockEl);
-    app.songs.splice(idx, 1);
+    if (idx >= 0) {
+        app.songs.splice(idx, 1);
+    }
     blockEl.remove();
     saveAllSongsToDB(app);
 }
@@ -292,8 +311,13 @@ function deleteSong(app, blockEl) {
 ///////////////////////////////////////////////////////////////////////////////
 function saveAllSongsToDB(app) {
     const tx = app.db.transaction(["songs"], "readwrite");
-    tx.objectStore("songs").clear().onsuccess = () => {
+    const store = tx.objectStore("songs");
+    const clearReq = store.clear();
+    clearReq.onsuccess = () => {
         app.songs.forEach(s => saveSongToDB(app, s));
+    };
+    clearReq.onerror = e => {
+        console.error("Error clearing songs store:", e);
     };
 }
 
@@ -301,17 +325,24 @@ function saveAllSongsToDB(app) {
 // DRAG REORDER
 ///////////////////////////////////////////////////////////////////////////////
 function enableDragReorder(app) {
-    new Sortable(app.root.querySelector(".songContainer"), {
-        animation: 150,
-        onEnd: () => {
-            const blocks = [...app.root.querySelectorAll(".song-block")];
-            app.songs = blocks.map(b => {
-                const id = b.dataset.songId;
-                return app.songs.find(s => s.id == id);
-            }).filter(x => x);
-            saveAllSongsToDB(app);
-        }
-    });
+    const container = app.root.querySelector(".songContainer");
+    if (!container._sortableBound) {
+        container._sortableBound = true;
+        new Sortable(container, {
+            animation: 150,
+            onEnd: () => {
+                const blocks = [...app.root.querySelectorAll(".song-block")];
+                const newOrder = [];
+                blocks.forEach(b => {
+                    const id = b.dataset.songId;
+                    const s = app.songs.find(x => String(x.id) === String(id));
+                    if (s) newOrder.push(s);
+                });
+                app.songs = newOrder;
+                saveAllSongsToDB(app);
+            }
+        });
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -354,10 +385,11 @@ function loadNewSong(app, file, waveId, blockEl) {
             leftHandle: left,
             rightHandle: right,
             arrayBuffer: buffer,
-            title: titleInput.value || file.name
+            title: titleInput.value || file.name,
+            blockEl
         };
 
-        blockEl.dataset.songId = "NEW";
+        blockEl.dataset.songId = "pending";
 
         left.on("update-end", () => saveSongToDB(app, obj));
         right.on("update-end", () => saveSongToDB(app, obj));
@@ -368,10 +400,13 @@ function loadNewSong(app, file, waveId, blockEl) {
         blockEl.querySelector(".previewPause").onclick =
             () => wave.pause();
 
-        titleInput.oninput = () => { obj.title = titleInput.value; saveSongToDB(app, obj); };
+        titleInput.oninput = () => {
+            obj.title = titleInput.value;
+            saveSongToDB(app, obj);
+        };
 
-        saveSongToDB(app, obj);
         app.songs.push(obj);
+        saveSongToDB(app, obj);
     });
 }
 
@@ -420,14 +455,18 @@ async function restoreSongFromDB(app, saved) {
             leftHandle: left,
             rightHandle: right,
             arrayBuffer: saved.data,
-            title: saved.title || saved.name
+            title: saved.title || saved.name,
+            blockEl: block
         };
 
         block.dataset.songId = saved.id;
 
         const titleInput = block.querySelector(".songTitle");
         titleInput.value = obj.title;
-        titleInput.oninput = () => { obj.title = titleInput.value; saveSongToDB(app, obj); };
+        titleInput.oninput = () => {
+            obj.title = titleInput.value;
+            saveSongToDB(app, obj);
+        };
 
         block.querySelector(".previewPlay").onclick =
             () => wave.play(left.end, right.start);
@@ -446,6 +485,8 @@ async function restoreSongFromDB(app, saved) {
 // SAVE SONG TO DB
 ///////////////////////////////////////////////////////////////////////////////
 function saveSongToDB(app, obj) {
+    if (!app.db) return;
+
     const rec = {
         name: obj.file.name,
         type: obj.file.type,
@@ -454,28 +495,45 @@ function saveSongToDB(app, obj) {
         trimEnd: obj.rightHandle.start,
         title: obj.title
     };
-    if (obj.id) rec.id = obj.id;
 
-    dbPut(app, "songs", rec).then(async () => {
-        if (!obj.id) {
-            const all = await dbGetAll(app, "songs");
-            const match = all.find(x =>
-                x.name === rec.name &&
-                x.trimStart === rec.trimStart
-            );
-            if (match) obj.id = match.id;
-        }
-    });
+    if (obj.id != null) {
+        rec.id = obj.id;
+    }
+
+    dbPut(app, "songs", rec)
+        .then(id => {
+            // For newly inserted records, update id and DOM
+            if (obj.id == null) {
+                obj.id = id;
+                if (obj.blockEl) {
+                    obj.blockEl.dataset.songId = id;
+                }
+            }
+        })
+        .catch(err => {
+            console.error("Error saving song:", err);
+        });
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // BUILD FINAL TRACK
 ///////////////////////////////////////////////////////////////////////////////
 async function buildTrack(app) {
+    if (!app.songs || app.songs.length === 0) {
+        alert("No songs loaded. Add at least one song first.");
+        return;
+    }
+
     app.audioCtx = new AudioContext();
 
-    const beepData = await fetch("beep.wav");
-    app.beepBuffer = await app.audioCtx.decodeAudioData(await beepData.arrayBuffer());
+    // Load beep sound (used later for playback/export)
+    try {
+        const beepData = await fetch("beep.wav");
+        const beepArrayBuf = await beepData.arrayBuffer();
+        app.beepBuffer = await app.audioCtx.decodeAudioData(beepArrayBuf);
+    } catch (e) {
+        console.warn("Could not load beep.wav. Beeps may not play/export correctly.", e);
+    }
 
     const RUN = app.TIME_LIMIT;
     const rate = app.audioCtx.sampleRate;
@@ -484,13 +542,19 @@ async function buildTrack(app) {
     let offset = 0;
 
     for (let s of app.songs) {
+        if (!s.arrayBuffer) continue;
+
         const decoded = await decodeFixRate(app, s.arrayBuffer);
 
         const L = Math.floor(s.leftHandle.end * rate);
         const R = Math.floor(s.rightHandle.start * rate);
 
         const length = R - L;
+        if (length <= 0) continue;
+
         const rem = (RUN * rate) - offset;
+        if (rem <= 0) break;
+
         const copy = Math.min(length, rem);
 
         for (let ch = 0; ch < decoded.numberOfChannels; ch++) {
@@ -508,6 +572,11 @@ async function buildTrack(app) {
     makeMainWaveform(app, final);
 
     app.root.querySelector(".startRun").disabled = false;
+
+    // enable export button once we have a final buffer
+    const exportBtn = app.root.querySelector(".exportTrack");
+    if (exportBtn) exportBtn.disabled = false;
+
     alert("Track built!");
 }
 
@@ -567,6 +636,169 @@ function makeMainWaveform(app, buffer) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// EXPORT FINAL TRACK TO WAV
+///////////////////////////////////////////////////////////////////////////////
+function exportTrack(app) {
+    if (!app.lastCombinedBuffer) {
+        alert("Build the track first.");
+        return;
+    }
+
+    if (!app.audioCtx || !app.beepBuffer) {
+        alert("Beep sound not loaded. Please rebuild the track first.");
+        return;
+    }
+
+    const base = app.lastCombinedBuffer; // songs only
+    const sampleRate = base.sampleRate;
+    const numChannels = base.numberOfChannels;
+
+    // Is ANW starter beeps toggle on?
+    const starterOn = app.root.querySelector(".starterBeepToggle").checked;
+
+    // If starter beeps are on, we add 3 seconds before the music:
+    //  - beep at t=0, 1, 2   (3-2-1)
+    //  - music starts at t=3
+    const preRunSeconds = starterOn ? 3 : 0;
+
+    const musicSeconds = base.length / sampleRate;
+    const totalSeconds = preRunSeconds + musicSeconds;
+
+    const exportLength = Math.floor(totalSeconds * sampleRate);
+    const exportBuf = app.audioCtx.createBuffer(numChannels, exportLength, sampleRate);
+
+    // Copy music into export buffer, starting at preRunSeconds
+    for (let ch = 0; ch < numChannels; ch++) {
+        const destData = exportBuf.getChannelData(ch);
+        const srcData  = base.getChannelData(ch);
+        destData.set(srcData, Math.floor(preRunSeconds * sampleRate));
+    }
+
+    // Mix in beeps
+    const beepBuf = app.beepBuffer;
+
+    // Starter beeps at t = 0, 1, 2 s (ONLY in exported file)
+    if (starterOn) {
+        [0, 1, 2].forEach(t => {
+            mixBeepIntoBuffer(exportBuf, beepBuf, t);
+        });
+    }
+
+    // Timing beeps: at "TIME_LIMIT - secLeft", but shifted by preRunSeconds
+    app.beepSecondsLeft.forEach(secLeft => {
+        const t = preRunSeconds + (app.TIME_LIMIT - secLeft);
+        if (t >= 0 && t < totalSeconds) {
+            mixBeepIntoBuffer(exportBuf, beepBuf, t);
+        }
+    });
+
+    // Convert to WAV and download
+    const wavBuffer = audioBufferToWav(exportBuf);
+    const blob = new Blob([wavBuffer], { type: "audio/wav" });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `NSC_${CURRENT_MODE}_${ts}.wav`;
+
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    URL.revokeObjectURL(url);
+}
+
+function mixBeepIntoBuffer(destBuf, beepBuf, timeSec) {
+    const sampleRate = destBuf.sampleRate;
+    const startSample = Math.floor(timeSec * sampleRate);
+
+    const destChannels = destBuf.numberOfChannels;
+    const beepChannels = beepBuf.numberOfChannels;
+    const beepLength   = beepBuf.length;
+
+    for (let i = 0; i < beepLength; i++) {
+        const destIndex = startSample + i;
+        if (destIndex >= destBuf.length) break;
+
+        for (let ch = 0; ch < destChannels; ch++) {
+            const srcChIndex = ch < beepChannels ? ch : 0;
+
+            const destData = destBuf.getChannelData(ch);
+            const srcData  = beepBuf.getChannelData(srcChIndex);
+
+            let sample = destData[destIndex] + srcData[i];
+
+            if (sample > 1) sample = 1;
+            if (sample < -1) sample = -1;
+
+            destData[destIndex] = sample;
+        }
+    }
+}
+
+// Helper: convert Web Audio AudioBuffer to 16-bit PCM WAV
+function audioBufferToWav(buffer) {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+
+    const samples = buffer.length;
+    const blockAlign = numChannels * bitDepth / 8;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = samples * blockAlign;
+
+    const arrayBuffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(arrayBuffer);
+
+    let offset = 0;
+
+    function writeString(str) {
+        for (let i = 0; i < str.length; i++) {
+            view.setUint8(offset++, str.charCodeAt(i));
+        }
+    }
+
+    // RIFF chunk descriptor
+    writeString("RIFF");
+    view.setUint32(offset, 36 + dataSize, true); offset += 4;
+    writeString("WAVE");
+
+    // fmt subchunk
+    writeString("fmt ");
+    view.setUint32(offset, 16, true); offset += 4;
+    view.setUint16(offset, format, true); offset += 2;
+    view.setUint16(offset, numChannels, true); offset += 2;
+    view.setUint32(offset, sampleRate, true); offset += 4;
+    view.setUint32(offset, byteRate, true); offset += 4;
+    view.setUint16(offset, blockAlign, true); offset += 2;
+    view.setUint16(offset, bitDepth, true); offset += 2;
+
+    // data subchunk
+    writeString("data");
+    view.setUint32(offset, dataSize, true); offset += 4;
+
+    // Interleave channel data
+    const channelData = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+        channelData.push(buffer.getChannelData(ch));
+    }
+
+    for (let i = 0; i < samples; i++) {
+        for (let ch = 0; ch < numChannels; ch++) {
+            let sample = channelData[ch][i];
+            sample = Math.max(-1, Math.min(1, sample));
+            view.setInt16(offset, sample * 0x7fff, true);
+            offset += 2;
+        }
+    }
+
+    return arrayBuffer;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // RUN START
 ///////////////////////////////////////////////////////////////////////////////
 function startRun(app) {
@@ -583,7 +815,7 @@ function startRun(app) {
             app.mainWave.seekTo(0);
             app.mainWave.play();
             scheduleBeeps(app);
-        }, 4000);
+        }, 3000);
 
     } else {
         app.mainWave.seekTo(0);
@@ -604,6 +836,7 @@ function scheduleBeeps(app) {
 }
 
 function playBeep(app) {
+    if (!app.audioCtx || !app.beepBuffer) return;
     const src = app.audioCtx.createBufferSource();
     src.buffer = app.beepBuffer;
     src.connect(app.audioCtx.destination);
