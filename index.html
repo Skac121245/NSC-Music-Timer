@@ -91,6 +91,22 @@
     <button class="pauseBtn">Pause</button>
     <button class="resumeBtn">Resume</button>
     <button class="restartBtn">Restart</button>
+    <hr>
+
+<h2>Coach Talk</h2>
+<p class="hintText">
+  Hold the button to talk...
+</p>
+
+<div class="coachControls">
+  <label><input type="checkbox" class="coachRightOnly" checked> Coach audio RIGHT ear only</label>
+  <label class="inlineLabel">Right-ear duck:</label>
+  <input type="range" class="coachDuck" min="0" max="1" step="0.05" value="0.5">
+  <span class="coachDuckVal">50%</span>
+</div>
+
+<button class="coachHold" disabled>HOLD TO TALK</button>
+<div class="coachStatus">Mic: <span class="coachStatusText">OFF</span></div>
 
     </div>
 </template>
