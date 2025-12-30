@@ -35,6 +35,13 @@ html.dark body {
     display: none;
 }
 
+/* SMALL HELP TEXT */
+.hintText {
+    font-size: 0.9rem;
+    opacity: 0.85;
+    margin-top: -6px;
+}
+
 /* YOUR ORIGINAL STYLES */
 .song-block {
     border: 1px solid #aaa;
@@ -86,4 +93,19 @@ html.dark body {
 
 .sortable-chosen {
     background: yellow !important;
+}
+
+/* INTRO BLOCK (same look, slightly highlighted) */
+.intro-block {
+    border: 1px solid #88a;
+    padding: 15px;
+    margin: 15px 0;
+    border-radius: 8px;
+    background: #eef3ff;
+    transition: background 0.3s;
+}
+
+.dark .intro-block {
+    background: #1a2333;
+    border-color: #445;
 }
