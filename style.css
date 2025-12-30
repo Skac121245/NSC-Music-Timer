@@ -95,7 +95,7 @@ html.dark body {
     background: yellow !important;
 }
 
-/* INTRO BLOCK (same look, slightly highlighted) */
+/* INTRO BLOCK */
 .intro-block {
     border: 1px solid #88a;
     padding: 15px;
@@ -108,4 +108,53 @@ html.dark body {
 .dark .intro-block {
     background: #1a2333;
     border-color: #445;
+}
+
+/* COACH TALK */
+.coachControls {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin: 8px 0 12px 0;
+}
+
+.inlineLabel {
+    margin-left: 6px;
+}
+
+.coachHold {
+    width: 100%;
+    max-width: 520px;
+    height: 90px;
+    font-size: 28px;
+    font-weight: 800;
+    border-radius: 16px;
+    border: 2px solid #777;
+    background: #f1f1f1;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.coachHold:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.coachHold.active {
+    background: #c62828;
+    color: white;
+    border-color: #8e1c1c;
+}
+
+.coachStatus {
+    margin-top: 8px;
+    font-weight: 700;
+}
+
+.dark .coachHold {
+    background: #1f1f1f;
+    border-color: #555;
+    color: #eee;
 }
