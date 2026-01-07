@@ -110,6 +110,20 @@ html.dark body {
     border-color: #445;
 }
 
+/* PROJECT TRANSFER */
+.transferRow {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.transferStatus {
+    font-weight: 700;
+    opacity: 0.9;
+}
+
 /* COACH TALK */
 .coachControls {
     display: flex;

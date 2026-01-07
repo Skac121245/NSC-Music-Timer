@@ -60,6 +60,9 @@ function createBlankAppInstance(root) {
         runPlaying: false,
         runTimer: null,
 
+        // Beeps
+        beepTimeouts: [],
+
         beepSecondsLeft: [180, 120, 60, 30, 10],
         TIME_LIMIT: 240
     };
@@ -96,7 +99,6 @@ async function initMode(mode) {
     wireButtons(app);
     enableDragReorder(app);
 
-    // Coach button can be enabled once we have an AudioContext (build or startRun)
     const coachBtn = app.root.querySelector(".coachHold");
     if (coachBtn) coachBtn.disabled = false;
 }
@@ -150,6 +152,16 @@ function dbGet(app, store, key) {
     });
 }
 
+function dbClearStore(app, store) {
+    return new Promise((resolve, reject) => {
+        const tx = app.db.transaction([store], "readwrite");
+        const os = tx.objectStore(store);
+        const req = os.clear();
+        req.onsuccess = () => resolve();
+        req.onerror = (e) => reject(e);
+    });
+}
+
 async function loadSettingsFromDB(app) {
     const s = await dbGet(app, "settings", "main");
     if (!s) return;
@@ -167,7 +179,7 @@ async function loadSettingsFromDB(app) {
 }
 
 function saveSettingsToDB(app) {
-    dbPut(app, "settings", {
+    return dbPut(app, "settings", {
         key: "main",
         beepTimes: app.beepSecondsLeft,
         starterBeep: app.root.querySelector(".starterBeepToggle").checked,
@@ -228,6 +240,57 @@ function wireButtons(app) {
         if (app.lastCombinedBuffer) makeMainWaveform(app, app.lastCombinedBuffer);
     };
 
+    // Project transfer
+    const statusEl = r.querySelector(".transferStatus");
+    const exportSetupBtn = r.querySelector(".exportSetup");
+    const importSetupBtn = r.querySelector(".importSetup");
+    const importFile = r.querySelector(".importSetupFile");
+
+    if (exportSetupBtn && !exportSetupBtn._bound) {
+        exportSetupBtn._bound = true;
+        exportSetupBtn.onclick = async () => {
+            if (statusEl) statusEl.textContent = "Exporting...";
+            try {
+                await exportSetupBundle(app);
+                if (statusEl) statusEl.textContent = "Exported setup ✅";
+                setTimeout(() => { if (statusEl) statusEl.textContent = ""; }, 1500);
+            } catch (e) {
+                console.error(e);
+                if (statusEl) statusEl.textContent = "Export failed ❌";
+            }
+        };
+    }
+
+    if (importSetupBtn && importFile && !importSetupBtn._bound) {
+        importSetupBtn._bound = true;
+
+        importSetupBtn.onclick = () => importFile.click();
+
+        importFile.onchange = async (e) => {
+            const file = e.target.files?.[0];
+            e.target.value = "";
+            if (!file) return;
+
+            const ok = confirm(
+                "Importing a setup will REPLACE the current songs/settings for this mode.\n\nContinue?"
+            );
+            if (!ok) return;
+
+            if (statusEl) statusEl.textContent = "Importing...";
+
+            try {
+                await importSetupBundle(app, file);
+                if (statusEl) statusEl.textContent = "Imported ✅ Reloading...";
+                // simplest way to fully rebuild UI + WaveSurfer state
+                setTimeout(() => location.reload(), 400);
+            } catch (err) {
+                console.error(err);
+                alert("Import failed. Make sure you selected a valid .json setup bundle.");
+                if (statusEl) statusEl.textContent = "Import failed ❌";
+            }
+        };
+    }
+
     // Coach controls
     const duck = r.querySelector(".coachDuck");
     const duckVal = r.querySelector(".coachDuckVal");
@@ -253,7 +316,6 @@ function wireButtons(app) {
         coachBtn.addEventListener("pointerup", up);
         coachBtn.addEventListener("pointercancel", up);
         coachBtn.addEventListener("pointerleave", (e) => {
-            // If the user drags finger/mouse away while held, stop talking
             if (app.micOn) up(e);
         });
     }
@@ -610,7 +672,6 @@ function loadNewSong(app, file, waveId, blockEl) {
             blockEl
         };
 
-        // Manual save button (confidence click)
         const saveBtn = blockEl.querySelector(".saveSongBtn");
         if (saveBtn) {
             saveBtn.disabled = false;
@@ -690,7 +751,6 @@ async function restoreSongFromDB(app, saved) {
             blockEl: block
         };
 
-        // Manual save button (confidence click)
         const saveBtn = block.querySelector(".saveSongBtn");
         if (saveBtn) {
             saveBtn.disabled = false;
@@ -754,6 +814,131 @@ function saveSongToDB(app, obj) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// SETUP BUNDLE EXPORT / IMPORT (NEW)
+///////////////////////////////////////////////////////////////////////////////
+async function exportSetupBundle(app) {
+    // Save latest settings first
+    await saveSettingsToDB(app);
+
+    const settingsMain = await dbGet(app, "settings", "main");
+    const settingsIntro = await dbGet(app, "settings", "intro");
+    const songs = await dbGetAll(app, "songs");
+
+    const bundle = {
+        kind: "NSC_SETUP_BUNDLE",
+        version: 1,
+        mode: CURRENT_MODE,
+        exportedAt: new Date().toISOString(),
+        settings: settingsMain || null,
+        intro: settingsIntro
+            ? {
+                name: settingsIntro.name,
+                type: settingsIntro.type,
+                title: settingsIntro.title,
+                trimStart: settingsIntro.trimStart,
+                trimEnd: settingsIntro.trimEnd,
+                dataBase64: arrayBufferToBase64(settingsIntro.data)
+            }
+            : null,
+        songs: songs.map(s => ({
+            name: s.name,
+            type: s.type,
+            title: s.title,
+            trimStart: s.trimStart,
+            trimEnd: s.trimEnd,
+            dataBase64: arrayBufferToBase64(s.data)
+        }))
+    };
+
+    const json = JSON.stringify(bundle);
+    const blob = new Blob([json], { type: "application/json" });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url;
+    a.download = `NSC_${CURRENT_MODE}_${ts}.nscsetup.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+async function importSetupBundle(app, file) {
+    const text = await file.text();
+    const bundle = JSON.parse(text);
+
+    if (!bundle || bundle.kind !== "NSC_SETUP_BUNDLE") {
+        throw new Error("Not a setup bundle");
+    }
+    if (!bundle.version || bundle.version !== 1) {
+        throw new Error("Unsupported bundle version");
+    }
+
+    // Optional warning (still allows import)
+    if (bundle.mode && bundle.mode !== CURRENT_MODE) {
+        const ok = confirm(
+            `This setup was exported from mode "${bundle.mode}", but you're importing into "${CURRENT_MODE}".\n\nImport anyway?`
+        );
+        if (!ok) return;
+    }
+
+    // Wipe current mode DB stores
+    await dbClearStore(app, "songs");
+    await dbClearStore(app, "settings");
+
+    // Restore settings
+    if (bundle.settings && bundle.settings.key === "main") {
+        await dbPut(app, "settings", bundle.settings);
+    } else if (bundle.settings) {
+        await dbPut(app, "settings", { ...bundle.settings, key: "main" });
+    }
+
+    // Restore intro (into settings store under key "intro")
+    if (bundle.intro) {
+        await dbPut(app, "settings", {
+            key: "intro",
+            name: bundle.intro.name,
+            type: bundle.intro.type,
+            title: bundle.intro.title,
+            trimStart: bundle.intro.trimStart,
+            trimEnd: bundle.intro.trimEnd,
+            data: base64ToArrayBuffer(bundle.intro.dataBase64)
+        });
+    }
+
+    // Restore songs (keep order by inserting in order)
+    for (const s of (bundle.songs || [])) {
+        await dbPut(app, "songs", {
+            name: s.name,
+            type: s.type,
+            title: s.title,
+            trimStart: s.trimStart,
+            trimEnd: s.trimEnd,
+            data: base64ToArrayBuffer(s.dataBase64)
+        });
+    }
+}
+
+function arrayBufferToBase64(buf) {
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+}
+
+function base64ToArrayBuffer(base64) {
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // AUDIO GRAPH (music stereo split + mic injection)
 ///////////////////////////////////////////////////////////////////////////////
 async function ensureAudioReady(app) {
@@ -785,11 +970,9 @@ function buildCoachGraph(app) {
     app.musicGainL.gain.value = 1.0;
     app.musicGainR.gain.value = 1.0;
 
-    // mic chain
     app.micGain = ctx.createGain();
     app.micGain.gain.value = 0.0;
 
-    // compressor for voice clarity (optional but helpful)
     app.micComp = ctx.createDynamicsCompressor();
     app.micComp.threshold.value = -24;
     app.micComp.knee.value = 24;
@@ -797,16 +980,13 @@ function buildCoachGraph(app) {
     app.micComp.attack.value = 0.005;
     app.micComp.release.value = 0.08;
 
-    // route music: splitter -> gains -> merger
     app.splitter.connect(app.musicGainL, 0);
     app.splitter.connect(app.musicGainR, 1);
     app.musicGainL.connect(app.merger, 0, 0);
     app.musicGainR.connect(app.merger, 0, 1);
 
-    // route mic: micGain -> compressor -> merger (default right-only, configurable at connect time)
     app.micGain.connect(app.micComp);
 
-    // output
     app.merger.connect(ctx.destination);
 
     app.graphReady = true;
@@ -904,7 +1084,6 @@ function makeMainWaveform(app, buffer) {
     app.mainWave.loadDecodedBuffer(buffer);
 
     app.mainWave.on("ready", () => {
-        // During runs we mute WaveSurfer's audio to avoid doubling
         app.mainWave.setVolume(1.0);
 
         const drawer = app.mainWave.drawer;
@@ -933,7 +1112,6 @@ async function ensureMic(app) {
 
     const ctx = app.audioCtx;
 
-    // Request mic (this MUST be triggered by user gesture -> pointerdown)
     const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
             echoCancellation: true,
@@ -945,24 +1123,19 @@ async function ensureMic(app) {
     app.micStream = stream;
     app.micSource = ctx.createMediaStreamSource(stream);
 
-    // Connect micSource -> micGain (sums into merger later)
     app.micSource.connect(app.micGain);
 
-    // Connect compressor output to merger channels based on "right only" toggle
     connectMicToMerger(app);
 }
 
 function connectMicToMerger(app) {
-    // clear any previous micComp connections (best-effort)
     try { app.micComp.disconnect(); } catch {}
 
     const rightOnly = app.root.querySelector(".coachRightOnly")?.checked ?? true;
 
     if (rightOnly) {
-        // mic -> right channel only
         app.micComp.connect(app.merger, 0, 1);
     } else {
-        // mic -> both channels
         app.micComp.connect(app.merger, 0, 0);
         app.micComp.connect(app.merger, 0, 1);
     }
@@ -971,7 +1144,6 @@ function connectMicToMerger(app) {
 async function coachStart(app) {
     await ensureAudioReady(app);
 
-    // Ensure mic exists + routed properly
     try {
         await ensureMic(app);
     } catch (e) {
@@ -980,17 +1152,14 @@ async function coachStart(app) {
         return;
     }
 
-    // Update routing in case toggle changed
     connectMicToMerger(app);
 
     const duckAmt = parseFloat(app.root.querySelector(".coachDuck")?.value ?? "0.5");
     const coachBtn = app.root.querySelector(".coachHold");
     const status = app.root.querySelector(".coachStatusText");
 
-    // Duck RIGHT ear music only while coaching
     if (app.musicGainR) app.musicGainR.gain.value = duckAmt;
 
-    // Turn on mic
     if (app.micGain) app.micGain.gain.value = 1.0;
     app.micOn = true;
 
@@ -1002,10 +1171,8 @@ async function coachStop(app) {
     const coachBtn = app.root.querySelector(".coachHold");
     const status = app.root.querySelector(".coachStatusText");
 
-    // Restore music
     if (app.musicGainR) app.musicGainR.gain.value = 1.0;
 
-    // Mute mic (keep stream alive so it’s instant next time)
     if (app.micGain) app.micGain.gain.value = 0.0;
     app.micOn = false;
 
@@ -1014,156 +1181,25 @@ async function coachStop(app) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// RUN PLAYBACK (OUR AUDIO) + WAVEFORM SYNC (MUTED WAVESURFER)
+// Beeps (PAUSE/RESUME SAFE)
 ///////////////////////////////////////////////////////////////////////////////
-async function startRun(app) {
-    if (!app.lastCombinedBuffer || !app.mainWave) {
-        alert("Build the track first.");
-        return;
-    }
-
-    await ensureAudioReady(app);
-
-    // Make sure WaveSurfer is muted during real playback (visual only)
-    app.mainWave.setVolume(0);
-
-    // Reset coach state
-    if (app.micOn) await coachStop(app);
-
-    // Stop any existing run
-    stopRunSource(app);
-
-    const starter = app.root.querySelector(".starterBeepToggle").checked;
-
-    const introInfo = await getIntroDecodedInfo(app);
-    const introDur = introInfo ? introInfo.trimmedSeconds : 0;
-
-    // Play intro (WebAudio direct), duck last 3 seconds if starter on
-    if (introInfo) {
-        playIntroWithOptionalDuck(app, introInfo, starter);
-
-        // Start main run exactly when intro ends
-        setTimeout(() => {
-            startMainRunAudio(app, 0);
-            scheduleBeeps(app, introDur);
-        }, Math.floor(introDur * 1000));
-
-        // Starter beeps happen during the duck window (end of intro)
-        if (starter) scheduleStarterBeepsAtEndOfIntro(app, introDur);
-
-        return;
-    }
-
-    // No intro:
-    if (starter) {
-        // play starter beeps now, start run at t=3
-        playBeepAfter(app, 0);
-        playBeepAfter(app, 1);
-        playBeepAfter(app, 2);
-
-        setTimeout(() => {
-            startMainRunAudio(app, 0);
-            scheduleBeeps(app, 3);
-        }, 3000);
-    } else {
-        startMainRunAudio(app, 0);
-        scheduleBeeps(app, 0);
-    }
+function clearBeepTimeouts(app) {
+    if (!app.beepTimeouts) app.beepTimeouts = [];
+    app.beepTimeouts.forEach(id => clearTimeout(id));
+    app.beepTimeouts = [];
 }
 
-function startMainRunAudio(app, offsetSec) {
-    if (!app.lastCombinedBuffer) return;
+function scheduleTimingBeepsFromPosition(app, runPositionSec) {
+    clearBeepTimeouts(app);
 
-    // Start WaveSurfer visual playback (muted)
-    app.mainWave.seekTo(offsetSec / app.TIME_LIMIT);
-    app.mainWave.play();
+    app.beepSecondsLeft.forEach(secLeft => {
+        const beepAtRunTime = (app.TIME_LIMIT - secLeft);
+        const delaySec = beepAtRunTime - runPositionSec;
 
-    // Start our real audio
-    const ctx = app.audioCtx;
-
-    const src = ctx.createBufferSource();
-    src.buffer = app.lastCombinedBuffer;
-
-    // music -> splitter -> (L/R gains) -> merger -> destination
-    src.connect(app.splitter);
-
-    app.runSource = src;
-    app.runStartCtxTime = ctx.currentTime;
-    app.runOffsetSec = offsetSec;
-    app.runPlaying = true;
-
-    // Ensure music gains are normal at start
-    app.musicGainL.gain.value = 1.0;
-    app.musicGainR.gain.value = 1.0;
-
-    // If coach is held mid-run, it will duck right ear via coachStart()
-
-    src.start(0, offsetSec);
-
-    // When finished, reset
-    src.onended = () => {
-        if (app.runPlaying) {
-            app.runPlaying = false;
-            app.runSource = null;
-            try { app.mainWave.pause(); } catch {}
+        if (delaySec > 0) {
+            const id = setTimeout(() => playBeep(app), delaySec * 1000);
+            app.beepTimeouts.push(id);
         }
-    };
-}
-
-function pauseRun(app) {
-    if (!app.runPlaying) return;
-
-    // Calculate current offset
-    const ctx = app.audioCtx;
-    const elapsed = ctx.currentTime - app.runStartCtxTime;
-    const current = app.runOffsetSec + elapsed;
-
-    stopRunSource(app);
-
-    app.runOffsetSec = Math.min(current, app.TIME_LIMIT);
-    app.runPlaying = false;
-
-    // Pause visual
-    if (app.mainWave) app.mainWave.pause();
-}
-
-function resumeRun(app) {
-    if (app.runPlaying) return;
-    if (!app.lastCombinedBuffer || !app.mainWave) return;
-
-    // Continue from offset
-    startMainRunAudio(app, app.runOffsetSec);
-}
-
-function restartRun(app) {
-    stopRunSource(app);
-    app.runOffsetSec = 0;
-    app.runPlaying = false;
-
-    if (app.mainWave) {
-        app.mainWave.seekTo(0);
-        app.mainWave.pause();
-    }
-
-    // restart immediately (no intro/starter logic here — restart means “restart run music”)
-    startMainRunAudio(app, 0);
-}
-
-function stopRunSource(app) {
-    if (app.runSource) {
-        try { app.runSource.stop(); } catch {}
-        try { app.runSource.disconnect(); } catch {}
-    }
-    app.runSource = null;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// Beeps
-///////////////////////////////////////////////////////////////////////////////
-function scheduleBeeps(app, startOffsetSec = 0) {
-    app.beepSecondsLeft.forEach(sec => {
-        const t = startOffsetSec + (app.TIME_LIMIT - sec);
-        setTimeout(() => playBeep(app), t * 1000);
     });
 }
 
@@ -1177,6 +1213,137 @@ function playBeep(app) {
     src.buffer = app.beepBuffer;
     src.connect(app.audioCtx.destination);
     src.start();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// RUN PLAYBACK
+///////////////////////////////////////////////////////////////////////////////
+async function startRun(app) {
+    if (!app.lastCombinedBuffer || !app.mainWave) {
+        alert("Build the track first.");
+        return;
+    }
+
+    await ensureAudioReady(app);
+
+    app.mainWave.setVolume(0);
+
+    if (app.micOn) await coachStop(app);
+
+    stopRunSource(app);
+    clearBeepTimeouts(app);
+
+    const starter = app.root.querySelector(".starterBeepToggle").checked;
+
+    const introInfo = await getIntroDecodedInfo(app);
+    const introDur = introInfo ? introInfo.trimmedSeconds : 0;
+
+    if (introInfo) {
+        playIntroWithOptionalDuck(app, introInfo, starter);
+
+        setTimeout(() => {
+            startMainRunAudio(app, 0);
+            scheduleTimingBeepsFromPosition(app, 0);
+        }, Math.floor(introDur * 1000));
+
+        if (starter) scheduleStarterBeepsAtEndOfIntro(app, introDur);
+        return;
+    }
+
+    if (starter) {
+        playBeepAfter(app, 0);
+        playBeepAfter(app, 1);
+        playBeepAfter(app, 2);
+
+        setTimeout(() => {
+            startMainRunAudio(app, 0);
+            scheduleTimingBeepsFromPosition(app, 0);
+        }, 3000);
+    } else {
+        startMainRunAudio(app, 0);
+        scheduleTimingBeepsFromPosition(app, 0);
+    }
+}
+
+function startMainRunAudio(app, offsetSec) {
+    if (!app.lastCombinedBuffer) return;
+
+    app.mainWave.seekTo(offsetSec / app.TIME_LIMIT);
+    app.mainWave.play();
+
+    const ctx = app.audioCtx;
+
+    const src = ctx.createBufferSource();
+    src.buffer = app.lastCombinedBuffer;
+
+    src.connect(app.splitter);
+
+    app.runSource = src;
+    app.runStartCtxTime = ctx.currentTime;
+    app.runOffsetSec = offsetSec;
+    app.runPlaying = true;
+
+    app.musicGainL.gain.value = 1.0;
+    app.musicGainR.gain.value = 1.0;
+
+    src.start(0, offsetSec);
+
+    src.onended = () => {
+        if (app.runPlaying) {
+            app.runPlaying = false;
+            app.runSource = null;
+            clearBeepTimeouts(app);
+            try { app.mainWave.pause(); } catch {}
+        }
+    };
+}
+
+function pauseRun(app) {
+    if (!app.runPlaying) return;
+
+    const ctx = app.audioCtx;
+    const elapsed = ctx.currentTime - app.runStartCtxTime;
+    const current = app.runOffsetSec + elapsed;
+
+    stopRunSource(app);
+    clearBeepTimeouts(app);
+
+    app.runOffsetSec = Math.min(current, app.TIME_LIMIT);
+    app.runPlaying = false;
+
+    if (app.mainWave) app.mainWave.pause();
+}
+
+function resumeRun(app) {
+    if (app.runPlaying) return;
+    if (!app.lastCombinedBuffer || !app.mainWave) return;
+
+    startMainRunAudio(app, app.runOffsetSec);
+    scheduleTimingBeepsFromPosition(app, app.runOffsetSec);
+}
+
+function restartRun(app) {
+    stopRunSource(app);
+    clearBeepTimeouts(app);
+
+    app.runOffsetSec = 0;
+    app.runPlaying = false;
+
+    if (app.mainWave) {
+        app.mainWave.seekTo(0);
+        app.mainWave.pause();
+    }
+
+    startMainRunAudio(app, 0);
+    scheduleTimingBeepsFromPosition(app, 0);
+}
+
+function stopRunSource(app) {
+    if (app.runSource) {
+        try { app.runSource.stop(); } catch {}
+        try { app.runSource.disconnect(); } catch {}
+    }
+    app.runSource = null;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1240,7 +1407,6 @@ function playIntroWithOptionalDuck(app, introInfo, starterOn) {
 }
 
 function scheduleStarterBeepsAtEndOfIntro(app, introDur) {
-    // Beeps at introEnd-3, -2, -1 (if intro shorter than 3, they start at 0)
     const first = Math.max(0, introDur - Math.min(3, introDur));
     playBeepAfter(app, first + 0);
     playBeepAfter(app, first + 1);
@@ -1254,8 +1420,7 @@ function stopIntroPlayback(app) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// EXPORT (unchanged in this step — still works with intro duck + beeps)
-// If you want exports to include the coach mic overlays, that's doable too.
+// EXPORT FINAL TRACK (unchanged)
 ///////////////////////////////////////////////////////////////////////////////
 async function exportTrack(app) {
     if (!app.lastCombinedBuffer) {
@@ -1268,8 +1433,6 @@ async function exportTrack(app) {
         return;
     }
 
-    // This export remains: intro (duck last 3 sec if starter on) + run + beeps.
-    // (Coach mic is live-only.)
     const starterOn = app.root.querySelector(".starterBeepToggle").checked;
 
     const introInfo = await getIntroDecodedInfo(app);
@@ -1286,7 +1449,6 @@ async function exportTrack(app) {
 
     const out = app.audioCtx.createBuffer(chs, Math.floor(totalSeconds * sr), sr);
 
-    // Intro mix (duck last section)
     if (introInfo) {
         const startS = introInfo.startSample;
         const endS = introInfo.endSample;
@@ -1297,12 +1459,10 @@ async function exportTrack(app) {
         if (duckStart < endS) mixBufferSegmentInto(out, introInfo.buffer, duckStart, endS, (duckStart - startS), 0.75);
     }
 
-    // Run music
     for (let ch = 0; ch < chs; ch++) {
         out.getChannelData(ch).set(base.getChannelData(ch), Math.floor(mainStart * sr));
     }
 
-    // Starter beeps
     if (starterOn && introInfo) {
         const firstBeep = Math.max(0, introDur - introDuckSeconds);
         [0, 1, 2].forEach(t => mixBeepIntoBuffer(out, app.beepBuffer, firstBeep + t));
@@ -1310,7 +1470,6 @@ async function exportTrack(app) {
         [0, 1, 2].forEach(t => mixBeepIntoBuffer(out, app.beepBuffer, t));
     }
 
-    // Timing beeps
     app.beepSecondsLeft.forEach(secLeft => {
         const t = mainStart + (app.TIME_LIMIT - secLeft);
         if (t >= 0 && t < totalSeconds) mixBeepIntoBuffer(out, app.beepBuffer, t);
